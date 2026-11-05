@@ -1,0 +1,305 @@
+name: Auto-post social
+
+# Central PA Report — scheduled auto-post
+#
+# Schedule
+# --------
+# GitHub Actions cron is UTC and does not follow US daylight saving time.
+# America/New_York is UTC-5 during EST (standard time) and UTC-4 during EDT.
+# cron "0 14 * * *" is 9:00 AM EST and 10:00 AM EDT, year-round.
+#
+# The same content file is posted on every run until you change the file
+# or set CONTENT_FILE. workflow_dispatch can override the path for one run.
+#
+# Secrets — Settings > Secrets and variables > Actions
+# No token is stored in this repository. Jobs read secrets from the environment.
+#
+# Instagram (Meta Graph API; reel from the rendered short, or a photo when MEDIA_IMAGE_URL is set)
+#   INSTAGRAM_ACCESS_TOKEN     User/page token with instagram_content_publish
+#   INSTAGRAM_ACCOUNT_ID       Instagram professional account id (not the Facebook Page id)
+# Facebook (Meta Graph API)
+#   FACEBOOK_ACCESS_TOKEN      Page access token with pages_manage_posts, pages_read_engagement, pages_show_list
+#   FACEBOOK_PAGE_ID
+# LinkedIn (Posts API, text only in v1; reserved little-text characters are escaped)
+#   LINKEDIN_ACCESS_TOKEN
+#   LINKEDIN_AUTHOR_URN        urn:li:person:... or urn:li:organization:...
+# YouTube Shorts (Data API v3 resumable upload; OAuth refresh token)
+#   YOUTUBE_CLIENT_ID
+#   YOUTUBE_CLIENT_SECRET
+#   YOUTUBE_REFRESH_TOKEN      scope https://www.googleapis.com/auth/youtube.upload
+# TikTok (Content Posting API direct post). Unaudited apps may only be allowed SELF_ONLY;
+# the job queries creator_info and uses the widest privacy level the account returns.
+#   TIKTOK_ACCESS_TOKEN        user token with video.publish (user.info.basic lets the job confirm open_id)
+#   TIKTOK_OPEN_ID
+# X (Twitter) API v2 tweet with OAuth 1.0a; image attached when the pin render or MEDIA_IMAGE_URL exists
+#   X_API_KEY
+#   X_API_SECRET
+#   X_ACCESS_TOKEN
+#   X_ACCESS_TOKEN_SECRET
+# Pinterest API v5 pin (generated 1000x1500 title card, or MEDIA_IMAGE_URL)
+#   PINTEREST_ACCESS_TOKEN     scopes boards:read, boards:write, pins:read, pins:write
+#   PINTEREST_BOARD_ID
+# Optional
+#   MEDIA_IMAGE_URL            Public http(s) image. Instagram photo fallback, optional X image,
+#                              Pinterest fallback, Facebook photo instead of a text post.
+#   CONTENT_FILE               Repo-relative markdown path (secret or repository variable).
+#                              Default: social-media-package-2026-11-04.md
+
+on:
+  schedule:
+    - cron: "0 14 * * *"
+  workflow_dispatch:
+    inputs:
+      content_file:
+        description: Repo-relative markdown content file
+        required: false
+        default: social-media-package-2026-11-04.md
+        type: string
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: auto-post-social
+  cancel-in-progress: false
+
+env:
+  CONTENT_FILE: ${{ github.event.inputs.content_file || vars.CONTENT_FILE || secrets.CONTENT_FILE || 'social-media-package-2026-11-04.md' }}
+
+jobs:
+  validate:
+    name: Validate content file
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      status: ${{ steps.validate.outputs.status }}
+      detail: ${{ steps.validate.outputs.detail }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check content file
+        id: validate
+        run: python3 .github/scripts/auto_post.py validate
+
+  prepare-media:
+    name: Render Short and pin image
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      status: ${{ steps.prepare.outputs.status }}
+      detail: ${{ steps.prepare.outputs.detail }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg fonts-dejavu-core
+      - name: Render vertical short
+        id: prepare
+        run: python3 .github/scripts/auto_post.py prepare
+      - name: Upload media
+        uses: actions/upload-artifact@v4
+        with:
+          name: social-media-assets
+          path: |
+            build/social/short.mp4
+            build/social/pin.jpg
+          if-no-files-found: error
+          retention-days: 1
+
+  instagram:
+    name: Instagram
+    needs: [validate, prepare-media]
+    if: always() && needs.validate.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      status: ${{ steps.post.outputs.status }}
+      detail: ${{ steps.post.outputs.detail }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download generated media
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: social-media-assets
+          path: build/social
+      - name: Post to Instagram
+        id: post
+        env:
+          INSTAGRAM_ACCESS_TOKEN: ${{ secrets.INSTAGRAM_ACCESS_TOKEN }}
+          INSTAGRAM_ACCOUNT_ID: ${{ secrets.INSTAGRAM_ACCOUNT_ID }}
+          MEDIA_IMAGE_URL: ${{ secrets.MEDIA_IMAGE_URL }}
+        run: python3 .github/scripts/auto_post.py post instagram
+
+  facebook:
+    name: Facebook
+    needs: validate
+    if: needs.validate.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      status: ${{ steps.post.outputs.status }}
+      detail: ${{ steps.post.outputs.detail }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Post to Facebook
+        id: post
+        env:
+          FACEBOOK_ACCESS_TOKEN: ${{ secrets.FACEBOOK_ACCESS_TOKEN }}
+          FACEBOOK_PAGE_ID: ${{ secrets.FACEBOOK_PAGE_ID }}
+          MEDIA_IMAGE_URL: ${{ secrets.MEDIA_IMAGE_URL }}
+        run: python3 .github/scripts/auto_post.py post facebook
+
+  linkedin:
+    name: LinkedIn
+    needs: validate
+    if: needs.validate.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      status: ${{ steps.post.outputs.status }}
+      detail: ${{ steps.post.outputs.detail }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Post to LinkedIn
+        id: post
+        env:
+          LINKEDIN_ACCESS_TOKEN: ${{ secrets.LINKEDIN_ACCESS_TOKEN }}
+          LINKEDIN_AUTHOR_URN: ${{ secrets.LINKEDIN_AUTHOR_URN }}
+        run: python3 .github/scripts/auto_post.py post linkedin
+
+  youtube:
+    name: YouTube Shorts
+    needs: [validate, prepare-media]
+    if: always() && needs.validate.result == 'success' && needs.prepare-media.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      status: ${{ steps.post.outputs.status }}
+      detail: ${{ steps.post.outputs.detail }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download generated media
+        uses: actions/download-artifact@v4
+        with:
+          name: social-media-assets
+          path: build/social
+      - name: Upload YouTube Short
+        id: post
+        env:
+          YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
+          YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
+          YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
+        run: python3 .github/scripts/auto_post.py post youtube
+
+  tiktok:
+    name: TikTok
+    needs: [validate, prepare-media]
+    if: always() && needs.validate.result == 'success' && needs.prepare-media.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      status: ${{ steps.post.outputs.status }}
+      detail: ${{ steps.post.outputs.detail }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download generated media
+        uses: actions/download-artifact@v4
+        with:
+          name: social-media-assets
+          path: build/social
+      - name: Upload TikTok video
+        id: post
+        env:
+          TIKTOK_ACCESS_TOKEN: ${{ secrets.TIKTOK_ACCESS_TOKEN }}
+          TIKTOK_OPEN_ID: ${{ secrets.TIKTOK_OPEN_ID }}
+        run: python3 .github/scripts/auto_post.py post tiktok
+
+  x:
+    name: X
+    needs: [validate, prepare-media]
+    if: always() && needs.validate.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      status: ${{ steps.post.outputs.status }}
+      detail: ${{ steps.post.outputs.detail }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download generated media
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: social-media-assets
+          path: build/social
+      - name: Post to X
+        id: post
+        env:
+          X_API_KEY: ${{ secrets.X_API_KEY }}
+          X_API_SECRET: ${{ secrets.X_API_SECRET }}
+          X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
+          X_ACCESS_TOKEN_SECRET: ${{ secrets.X_ACCESS_TOKEN_SECRET }}
+          MEDIA_IMAGE_URL: ${{ secrets.MEDIA_IMAGE_URL }}
+        run: python3 .github/scripts/auto_post.py post x
+
+  pinterest:
+    name: Pinterest
+    needs: [validate, prepare-media]
+    if: always() && needs.validate.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      status: ${{ steps.post.outputs.status }}
+      detail: ${{ steps.post.outputs.detail }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download generated media
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: social-media-assets
+          path: build/social
+      - name: Create Pinterest pin
+        id: post
+        env:
+          PINTEREST_ACCESS_TOKEN: ${{ secrets.PINTEREST_ACCESS_TOKEN }}
+          PINTEREST_BOARD_ID: ${{ secrets.PINTEREST_BOARD_ID }}
+          MEDIA_IMAGE_URL: ${{ secrets.MEDIA_IMAGE_URL }}
+        run: python3 .github/scripts/auto_post.py post pinterest
+
+  summary:
+    name: Report results
+    needs: [validate, prepare-media, instagram, facebook, linkedin, youtube, tiktok, x, pinterest]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Surface platform results
+        env:
+          VALIDATE_RESULT: ${{ needs.validate.result }}
+          VALIDATE_DETAIL: ${{ needs.validate.outputs.detail }}
+          PREPARE_RESULT: ${{ needs.prepare-media.result }}
+          PREPARE_DETAIL: ${{ needs.prepare-media.outputs.detail }}
+          RESULT_INSTAGRAM: ${{ needs.instagram.result }}
+          STATUS_INSTAGRAM: ${{ needs.instagram.outputs.status }}
+          DETAIL_INSTAGRAM: ${{ needs.instagram.outputs.detail }}
+          RESULT_FACEBOOK: ${{ needs.facebook.result }}
+          STATUS_FACEBOOK: ${{ needs.facebook.outputs.status }}
+          DETAIL_FACEBOOK: ${{ needs.facebook.outputs.detail }}
+          RESULT_LINKEDIN: ${{ needs.linkedin.result }}
+          STATUS_LINKEDIN: ${{ needs.linkedin.outputs.status }}
+          DETAIL_LINKEDIN: ${{ needs.linkedin.outputs.detail }}
+          RESULT_YOUTUBE: ${{ needs.youtube.result }}
+          STATUS_YOUTUBE: ${{ needs.youtube.outputs.status }}
+          DETAIL_YOUTUBE: ${{ needs.youtube.outputs.detail }}
+          RESULT_TIKTOK: ${{ needs.tiktok.result }}
+          STATUS_TIKTOK: ${{ needs.tiktok.outputs.status }}
+          DETAIL_TIKTOK: ${{ needs.tiktok.outputs.detail }}
+          RESULT_X: ${{ needs.x.result }}
+          STATUS_X: ${{ needs.x.outputs.status }}
+          DETAIL_X: ${{ needs.x.outputs.detail }}
+          RESULT_PINTEREST: ${{ needs.pinterest.result }}
+          STATUS_PINTEREST: ${{ needs.pinterest.outputs.status }}
+          DETAIL_PINTEREST: ${{ needs.pinterest.outputs.detail }}
+        run: python3 .github/scripts/auto_post.py summarize
